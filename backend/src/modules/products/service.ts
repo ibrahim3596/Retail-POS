@@ -1,7 +1,7 @@
-// Product & Inventory management service
 import { prisma } from '@shared/database/prisma';
 import { logger } from '@shared/utils/logger';
 import { NotFoundError, ConflictError, ValidationError } from '@shared/types/errors';
+import { normalizeBarcode } from './barcodeNormalizer';
 
 export interface CreateProductInput {
   storeId: string;
@@ -14,7 +14,7 @@ export interface CreateProductInput {
   packSize?: string;
   productImage?: string;
   identificationSource?: 'MANUAL' | 'LOCAL_DB' | 'EXTERNAL_API' | 'OCR' | 'AI';
-  verificationStatus?: 'VERIFIED_EXTERNAL' | 'SHOPKEEPER_CONFIRMED' | 'OCR_SUGGESTED' | 'AI_SUGGESTED' | 'UNKNOWN';
+  verificationStatus?: 'UNKNOWN' | 'IDENTIFIED' | 'REVIEW_REQUIRED' | 'VERIFIED' | 'REJECTED' | 'STALE';
   description?: string;
   hsnCode?: string;
   unit?: string;
@@ -33,7 +33,45 @@ export interface UpdateProductInput extends Partial<CreateProductInput> {
 }
 
 /**
- * Create a new product
+ * Verifies whether a normalized barcode collides with ANY primary product barcode OR alias within the store.
+ */
+export async function checkBarcodeCollision(storeId: string, normalizedBarcode: string, excludeProductId?: string) {
+  if (!normalizedBarcode) return;
+
+  // 1. Check Product.normalizedBarcode & Product.barcode
+  const existingProduct = await prisma.product.findFirst({
+    where: {
+      storeId,
+      OR: [
+        { normalizedBarcode },
+        { barcode: normalizedBarcode },
+      ],
+      ...(excludeProductId ? { id: { not: excludeProductId } } : {}),
+    },
+  });
+  if (existingProduct) {
+    throw new ConflictError(`Barcode '${normalizedBarcode}' already exists on product '${existingProduct.name}'`);
+  }
+
+  // 2. Check ProductAlias.normalizedAlias & ProductAlias.aliasBarcode
+  const existingAlias = await prisma.productAlias.findFirst({
+    where: {
+      storeId,
+      OR: [
+        { normalizedAlias: normalizedBarcode },
+        { aliasBarcode: normalizedBarcode },
+      ],
+      ...(excludeProductId ? { productId: { not: excludeProductId } } : {}),
+    },
+    include: { product: true },
+  });
+  if (existingAlias) {
+    throw new ConflictError(`Barcode '${normalizedBarcode}' already exists as an alias on product '${existingAlias.product.name}'`);
+  }
+}
+
+/**
+ * Create a new product with GTIN normalization and cross-table collision checks
  */
 export async function createProduct(input: CreateProductInput) {
   // Validate pricing
@@ -53,21 +91,25 @@ export async function createProduct(input: CreateProductInput) {
     throw new ConflictError(`Product with SKU '${input.sku}' already exists`);
   }
 
-  // Check for duplicate barcode (store-scoped)
+  let rawBarcode: string | null = null;
+  let canonicalGtin: string | null = null;
+
+  // Normalize barcode and check cross-table collision
   if (input.barcode && input.barcode.trim() !== '') {
-    const existingBarcode = await prisma.product.findFirst({
-      where: { storeId: input.storeId, barcode: input.barcode },
-    });
-    if (existingBarcode) {
-      throw new ConflictError(`Product with barcode '${input.barcode}' already exists`);
-    }
+    rawBarcode = input.barcode.trim();
+    const normalized = normalizeBarcode(rawBarcode);
+    canonicalGtin = normalized.canonicalGtin;
+
+    // Check collision across primary barcode AND aliases in store
+    await checkBarcodeCollision(input.storeId, canonicalGtin || rawBarcode);
   }
 
   const product = await prisma.product.create({
     data: {
       storeId: input.storeId,
       sku: input.sku,
-      barcode: input.barcode && input.barcode.trim() !== '' ? input.barcode : null,
+      barcode: rawBarcode,
+      normalizedBarcode: canonicalGtin,
       name: input.name,
       brand: input.brand || null,
       category: input.category || null,
@@ -75,7 +117,7 @@ export async function createProduct(input: CreateProductInput) {
       packSize: input.packSize || null,
       productImage: input.productImage || null,
       identificationSource: input.identificationSource || 'MANUAL',
-      verificationStatus: input.verificationStatus || 'VERIFIED_EXTERNAL',
+      verificationStatus: input.verificationStatus || 'VERIFIED',
       description: input.description,
       hsnCode: input.hsnCode,
       unit: input.unit || 'PCS',
@@ -108,11 +150,72 @@ export async function createProduct(input: CreateProductInput) {
 }
 
 /**
- * Find product by barcode
+ * Add a barcode alias to an existing product with cross-table collision validation
+ */
+export async function addProductAlias(storeId: string, productId: string, aliasBarcode: string, source: any = 'MANUAL') {
+  const trimmed = aliasBarcode.trim();
+  if (!trimmed) {
+    throw new ValidationError({ aliasBarcode: ['Barcode alias cannot be empty'] });
+  }
+
+  const normalized = normalizeBarcode(trimmed);
+  const canonicalGtin = normalized.canonicalGtin || trimmed;
+
+  const product = await prisma.product.findFirst({
+    where: { id: productId, storeId },
+  });
+  if (!product) {
+    throw new NotFoundError('Product', productId);
+  }
+
+  // Cross-table collision check across primary barcode AND aliases in store
+  await checkBarcodeCollision(storeId, canonicalGtin);
+
+  return prisma.productAlias.create({
+    data: {
+      storeId,
+      productId,
+      aliasBarcode: trimmed,
+      normalizedAlias: canonicalGtin,
+      source,
+    },
+  });
+}
+
+/**
+ * Remove a barcode alias
+ */
+export async function removeProductAlias(storeId: string, aliasId: string) {
+  const alias = await prisma.productAlias.findFirst({
+    where: { id: aliasId, storeId },
+  });
+  if (!alias) {
+    throw new NotFoundError('ProductAlias', aliasId);
+  }
+
+  return prisma.productAlias.delete({
+    where: { id: aliasId },
+  });
+}
+
+/**
+ * Find product by primary barcode OR alias
  */
 export async function findProductByBarcode(storeId: string, barcode: string) {
-  const product = await prisma.product.findFirst({
-    where: { storeId, barcode, isActive: true },
+  const trimmed = barcode.trim();
+  const normalized = normalizeBarcode(trimmed);
+  const searchGtin = normalized.canonicalGtin || trimmed;
+
+  // 1. Search primary barcode / normalizedBarcode
+  let product = await prisma.product.findFirst({
+    where: {
+      storeId,
+      isActive: true,
+      OR: [
+        { barcode: trimmed },
+        { normalizedBarcode: searchGtin },
+      ],
+    },
     include: {
       batches: {
         where: { remainingQty: { gt: 0 } },
@@ -120,6 +223,33 @@ export async function findProductByBarcode(storeId: string, barcode: string) {
       },
     },
   });
+
+  // 2. Search ProductAlias if primary search misses
+  if (!product) {
+    const alias = await prisma.productAlias.findFirst({
+      where: {
+        storeId,
+        OR: [
+          { aliasBarcode: trimmed },
+          { normalizedAlias: searchGtin },
+        ],
+      },
+      include: {
+        product: {
+          include: {
+            batches: {
+              where: { remainingQty: { gt: 0 } },
+              orderBy: { expiryDate: 'asc' },
+            },
+          },
+        },
+      },
+    });
+
+    if (alias && alias.product && alias.product.isActive) {
+      product = alias.product as any;
+    }
+  }
 
   if (!product) {
     throw new NotFoundError('Product', barcode);

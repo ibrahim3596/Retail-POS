@@ -78,6 +78,8 @@ model Store {
   invoices    Invoice[]
   suppliers   Supplier[]
   syncLogs    SyncLog[]
+  aliases              ProductAlias[]
+  identificationAttempts ProductIdentificationAttempt[]
 
   @@index([gstin])
 }
@@ -106,8 +108,12 @@ model Product {
   variant              String?  // e.g. "500g", "Pack of 2"
   packSize             String?
   productImage         String?
+  normalizedBarcode    String?  // Canonical GTIN-14 string
+  confidenceScore      Float    @default(1.0)
+  lastVerifiedAt       DateTime?
+  version              Int      @default(1)
   identificationSource IdentificationSource @default(MANUAL)
-  verificationStatus   VerificationStatus   @default(VERIFIED_EXTERNAL)
+  verificationStatus   VerificationStatus   @default(VERIFIED)
   isActive      Boolean  @default(true)
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
@@ -117,11 +123,16 @@ model Product {
   batches       Batch[]
   invoiceItems  InvoiceItem[]
   stockMovements StockMovement[]
+  fieldProvenances     ProductFieldProvenance[]
+  identificationAttempts ProductIdentificationAttempt[]
+  aliases              ProductAlias[]
 
   @@unique([storeId, sku])
   @@unique([storeId, barcode])
+  @@unique([storeId, normalizedBarcode])
   @@index([storeId])
   @@index([barcode])
+  @@index([storeId, normalizedBarcode])
   @@index([category])
 }
 
@@ -418,10 +429,112 @@ enum IdentificationSource {
   AI
 }
 
+enum ProvenanceSource {
+  MANUAL
+  LOCAL
+  GLOBAL_CATALOG
+  EXTERNAL_PROVIDER
+  OCR
+  AI
+  SHOPKEEPER
+}
+
 enum VerificationStatus {
-  VERIFIED_EXTERNAL
-  SHOPKEEPER_CONFIRMED
-  OCR_SUGGESTED
-  AI_SUGGESTED
   UNKNOWN
+  IDENTIFIED
+  REVIEW_REQUIRED
+  VERIFIED
+  REJECTED
+  STALE
+}
+
+model ProductFieldProvenance {
+  id                   String             @id @default(uuid())
+  productId            String
+  fieldName            String
+  source               ProvenanceSource
+  confidence           Float              @default(1.0)
+  verifiedByShopkeeper Boolean            @default(false)
+  rawValue             String?
+  updatedAt            DateTime           @updatedAt
+
+  product              Product            @relation(fields: [productId], references: [id], onDelete: Cascade)
+  history              ProductFieldProvenanceHistory[]
+
+  @@unique([productId, fieldName])
+  @@index([productId])
+}
+
+model ProductFieldProvenanceHistory {
+  id                   String                 @id @default(uuid())
+  provenanceId         String
+  productId            String
+  fieldName            String
+  oldValue             String?
+  newValue             String?
+  source               ProvenanceSource
+  updatedByUserId      String
+  createdAt            DateTime               @default(now())
+
+  provenance           ProductFieldProvenance @relation(fields: [provenanceId], references: [id], onDelete: Cascade)
+
+  @@index([productId, fieldName])
+  @@index([createdAt])
+}
+
+model ProductAlias {
+  id                   String             @id @default(uuid())
+  storeId              String
+  productId            String
+  aliasBarcode         String
+  normalizedAlias      String
+  source               ProvenanceSource   @default(MANUAL)
+  createdAt            DateTime           @default(now())
+
+  product              Product            @relation(fields: [productId], references: [id], onDelete: Cascade)
+  store                Store              @relation(fields: [storeId], references: [id])
+
+  @@unique([storeId, normalizedAlias])
+  @@index([storeId, aliasBarcode])
+}
+
+model ProductIdentificationAttempt {
+  id                   String             @id @default(uuid())
+  storeId              String
+  rawBarcode           String?
+  normalizedBarcode    String?
+  attemptType          String
+  rawOcrText           String?            @db.Text
+  ocrBoundingBoxesJson String?            @db.Text
+  providerUsed         String?
+  latencyMs            Int
+  costIncurred         Decimal            @default(0) @db.Decimal(8, 4)
+  success              Boolean
+  createdProductId     String?
+  createdAt            DateTime           @default(now())
+
+  product              Product?           @relation(fields: [createdProductId], references: [id])
+  store                Store              @relation(fields: [storeId], references: [id])
+
+  @@index([storeId, createdAt])
+  @@index([normalizedBarcode])
+}
+
+model GlobalProductCatalog {
+  id                   String             @id @default(uuid())
+  gtin                 String             @unique
+  name                 String
+  brand                String?
+  category             String?
+  packSize             String?
+  suggestedMrp         Decimal?           @db.Decimal(12, 2)
+  suggestedGstRate     Decimal?           @db.Decimal(5, 2)
+  suggestedHsnCode     String?
+  imageUrl             String?
+  dataSource           String
+  verificationCount    Int                @default(1)
+  createdAt            DateTime           @default(now())
+  updatedAt            DateTime           @updatedAt
+
+  @@index([gtin])
 }

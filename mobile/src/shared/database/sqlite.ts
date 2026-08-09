@@ -189,11 +189,29 @@ await db.executeSql(`
   await db.executeSql(`ALTER TABLE products ADD COLUMN variant TEXT`).catch(() => {});
   await db.executeSql(`ALTER TABLE products ADD COLUMN pack_size TEXT`).catch(() => {});
   await db.executeSql(`ALTER TABLE products ADD COLUMN product_image TEXT`).catch(() => {});
+  await db.executeSql(`ALTER TABLE products ADD COLUMN normalized_barcode TEXT`).catch(() => {});
   await db.executeSql(`ALTER TABLE products ADD COLUMN identification_source TEXT DEFAULT 'MANUAL'`).catch(() => {});
-  await db.executeSql(`ALTER TABLE products ADD COLUMN verification_status TEXT DEFAULT 'VERIFIED_EXTERNAL'`).catch(() => {});
+  await db.executeSql(`ALTER TABLE products ADD COLUMN verification_status TEXT DEFAULT 'VERIFIED'`).catch(() => {});
 
-  // Create indices for performance
+  // Create Product Aliases table for multi-barcode support
+  await db.executeSql(`
+    CREATE TABLE IF NOT EXISTS product_aliases (
+      id TEXT PRIMARY KEY NOT NULL,
+      store_id TEXT NOT NULL,
+      product_id TEXT NOT NULL,
+      alias_barcode TEXT NOT NULL,
+      normalized_alias TEXT NOT NULL,
+      source TEXT DEFAULT 'MANUAL',
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (product_id) REFERENCES products (id) ON DELETE CASCADE
+    );
+  `);
+
+  // Create indices for performance & store-scoped uniqueness
   await db.executeSql(`CREATE UNIQUE INDEX IF NOT EXISTS idx_products_store_barcode ON products(store_id, barcode) WHERE barcode IS NOT NULL AND barcode != ''`);
+  await db.executeSql(`CREATE UNIQUE INDEX IF NOT EXISTS idx_products_store_normalized_barcode ON products(store_id, normalized_barcode) WHERE normalized_barcode IS NOT NULL AND normalized_barcode != ''`);
+  await db.executeSql(`CREATE UNIQUE INDEX IF NOT EXISTS idx_product_aliases_store_barcode ON product_aliases(store_id, normalized_alias)`);
+  await db.executeSql(`CREATE INDEX IF NOT EXISTS idx_product_aliases_product ON product_aliases(product_id)`);
   await db.executeSql(`CREATE INDEX IF NOT EXISTS idx_products_store ON products(store_id)`);
   await db.executeSql(`CREATE INDEX IF NOT EXISTS idx_invoices_synced ON invoices(is_synced)`);
   await db.executeSql(`CREATE INDEX IF NOT EXISTS idx_sync_queue_entity ON sync_queue(entity_type)`);
