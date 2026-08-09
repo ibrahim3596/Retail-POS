@@ -147,6 +147,69 @@ router.post('/:id/stock-adjustment', authorize(UserRole.OWNER, UserRole.MANAGER)
   }
 });
 
+import { providerRouter } from './providers/router';
+
+/**
+ * POST /api/products/identify
+ * Identification endpoint for GTIN lookup across local store, global catalog, and external providers.
+ * SECURITY: storeId is derived EXCLUSIVELY from authenticated req.user.storeId (prevents IDOR attacks).
+ */
+router.post('/identify', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const storeId = req.user!.storeId; // Enforce authenticated tenant boundary
+    const barcode = req.body.barcode || req.body.gtin;
+
+    if (!barcode || typeof barcode !== 'string' || !barcode.trim()) {
+      return res.status(400).json({ success: false, error: 'Barcode parameter is required' });
+    }
+
+    const trimmed = barcode.trim();
+
+    // 1. Local Store Product Check
+    try {
+      const localProduct = await findProductByBarcode(storeId, trimmed);
+      return res.json({
+        success: true,
+        data: {
+          status: 'FOUND_LOCAL',
+          source: 'LOCAL_STORE',
+          product: localProduct,
+          requiresReview: false,
+        },
+      });
+    } catch {
+      // Local miss - proceed to global catalog and external provider router
+    }
+
+    // 2. Provider Router Cascade (Global Catalog -> Cache -> External Providers)
+    const result = await providerRouter.identifyProductByBarcode(storeId, trimmed);
+
+    if (result.status === 'FOUND' && result.candidate) {
+      return res.json({
+        success: true,
+        data: {
+          status: 'IDENTIFIED',
+          source: result.source,
+          candidate: result.candidate,
+          requiresReview: true, // Commercial pricing & GST require shopkeeper confirmation
+        },
+      });
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        status: 'NOT_FOUND',
+        source: result.source,
+        candidate: null,
+        requiresReview: false,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 import { prisma } from '@shared/database/prisma';
 
 export default router;
