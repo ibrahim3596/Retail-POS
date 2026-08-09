@@ -1,0 +1,341 @@
+// Prisma schema for SQLite testing
+// Supports multi-tenant stores, offline sync, GST billing, and inventory tracking
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("TEST_DATABASE_URL")
+}
+
+// ==================== USER & AUTH ====================
+
+model User {
+  id            String    @id @default(uuid())
+  email         String    @unique
+  phone         String?   @unique
+  passwordHash  String
+  name          String
+  role          String    @default("CASHIER") // OWNER, MANAGER, CASHIER
+  isActive      Boolean   @default(true)
+  storeId       String
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  lastLoginAt   DateTime?
+
+  store         Store     @relation(fields: [storeId], references: [id])
+  sessions      Session[]
+  syncLogs      SyncLog[]
+  auditLogs     AuditLog[]
+
+  @@index([storeId])
+  @@index([email])
+}
+
+model Session {
+  id           String   @id @default(uuid())
+  userId       String
+  refreshToken String   @unique
+  deviceInfo   String?
+  expiresAt    DateTime
+  createdAt    DateTime @default(now())
+
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([refreshToken])
+}
+
+// ==================== STORE ====================
+
+model Store {
+  id          String   @id @default(uuid())
+  name        String
+  gstin       String?  // GST Identification Number (India)
+  address     String?
+  city        String?
+  state       String?
+  pincode     String?
+  phone       String?
+  email       String?
+  currency    String   @default("INR")
+  timezone    String   @default("Asia/Kolkata")
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  users       User[]
+  products    Product[]
+  customers   Customer[]
+  invoices    Invoice[]
+  suppliers   Supplier[]
+  syncLogs    SyncLog[]
+
+  @@index([gstin])
+}
+
+// ==================== PRODUCTS & INVENTORY ====================
+
+model Product {
+  id            String   @id @default(uuid())
+  storeId       String
+  sku           String   // Internal SKU
+  barcode       String?  // EAN/UPC barcode
+  name          String
+  description   String?
+  category      String?
+  hsnCode       String?  // HSN code for GST
+  unit          String   @default("PCS") // PCS, KG, LTR, etc.
+  mrp           Float    @default(0) // Maximum Retail Price
+  sellingPrice  Float    @default(0)
+  purchasePrice Float    @default(0) // Cost price
+  gstRate       Float    @default(18.00) // GST percentage
+  taxType       String   @default("GST") // GST, EXEMPT, NIL
+  currentStock  Float    @default(0)
+  minStock      Float    @default(0) // Low stock threshold
+  maxStock      Float    @default(0)
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  deletedAt     DateTime? // Soft delete
+
+  store         Store    @relation(fields: [storeId], references: [id])
+  batches       Batch[]
+  invoiceItems  InvoiceItem[]
+  stockMovements StockMovement[]
+
+  @@unique([storeId, sku])
+  @@unique([storeId, barcode])
+  @@index([storeId])
+  @@index([barcode])
+  @@index([category])
+}
+
+model Batch {
+  id          String   @id @default(uuid())
+  productId   String
+  batchNumber String
+  quantity    Float
+  remainingQty Float
+  mfgDate     DateTime?
+  expiryDate  DateTime?
+  purchasePrice Float
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  product     Product  @relation(fields: [productId], references: [id])
+  stockMovements StockMovement[]
+
+  @@unique([productId, batchNumber])
+  @@index([expiryDate])
+  @@index([productId])
+}
+
+model StockMovement {
+  id          String   @id @default(uuid())
+  productId   String
+  batchId     String?
+  type        String   // IN, OUT, ADJUSTMENT
+  quantity    Float
+  referenceType String? // INVOICE, PURCHASE, ADJUSTMENT
+  referenceId String?
+  notes       String?
+  createdAt   DateTime @default(now())
+
+  product     Product  @relation(fields: [productId], references: [id])
+  batch       Batch?   @relation(fields: [batchId], references: [id])
+
+  @@index([productId])
+  @@index([type])
+  @@index([createdAt])
+  @@index([productId, createdAt])
+  @@index([referenceType, referenceId])
+}
+
+// ==================== CUSTOMER ====================
+
+model Customer {
+  id          String   @id @default(uuid())
+  storeId     String
+  name        String
+  phone       String?
+  email       String?
+  gstin       String?  // For B2B customers
+  address     String?
+  creditLimit Float    @default(0)
+  balance     Float    @default(0) // Outstanding balance
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  store       Store    @relation(fields: [storeId], references: [id])
+  invoices    Invoice[]
+  creditLedger CreditLedgerEntry[]
+
+  @@index([storeId])
+  @@unique([storeId, phone])
+}
+
+model CreditLedgerEntry {
+  id          String   @id @default(uuid())
+  customerId  String
+  type        String   // DEBIT, CREDIT
+  amount      Float
+  balance     Float // Running balance after this entry
+  referenceType String? // INVOICE, PAYMENT
+  referenceId String?
+  notes       String?
+  createdAt   DateTime @default(now())
+
+  customer    Customer @relation(fields: [customerId], references: [id])
+
+  @@index([customerId])
+  @@index([createdAt])
+}
+
+// ==================== SUPPLIER ====================
+
+model Supplier {
+  id          String   @id @default(uuid())
+  storeId     String
+  name        String
+  phone       String?
+  email       String?
+  gstin       String?
+  address     String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  store       Store    @relation(fields: [storeId], references: [id])
+
+  @@index([storeId])
+}
+
+// ==================== BILLING / INVOICES ====================
+
+model Invoice {
+  id            String   @id @default(uuid())
+  invoiceNumber String   @unique // Human-readable: INV-000001
+  storeId       String
+  customerId    String?
+  userId        String   // Cashier who created it
+  
+  // Totals
+  subtotal      Float
+  discountAmount Float   @default(0)
+  discountPercent Float  @default(0)
+  cgstAmount    Float   @default(0)
+  sgstAmount    Float   @default(0)
+  igstAmount    Float   @default(0)
+  cessAmount    Float   @default(0)
+  totalTax      Float   @default(0)
+  roundOff      Float   @default(0)
+  grandTotal    Float
+  amountPaid    Float   @default(0)
+  
+  // Payment
+  paymentMethod String   @default("CASH") // CASH, CARD, UPI, CREDIT, PARTIAL
+  paymentStatus String   @default("PAID") // PAID, PARTIAL, PENDING, REFUNDED
+  isCreditSale Boolean   @default(false)
+  
+  // Status
+  status        String   @default("COMPLETED") // DRAFT, COMPLETED, CANCELLED, RETURNED
+  
+  // GST specific
+  isInterstate  Boolean   @default(false) // Determines CGST+SGST vs IGST
+  
+  // Sync
+  localId       String?  // ID from offline device
+  syncedAt      DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  store         Store    @relation(fields: [storeId], references: [id])
+  customer      Customer? @relation(fields: [customerId], references: [id])
+  items         InvoiceItem[]
+
+  @@index([storeId])
+  @@index([customerId])
+  @@index([createdAt])
+  @@unique([storeId, localId])
+  @@index([invoiceNumber])
+  @@index([storeId, syncedAt])
+}
+
+model InvoiceItem {
+  id          String   @id @default(uuid())
+  invoiceId   String
+  productId   String
+  productName String   // Snapshot at time of sale
+  hsnCode     String?
+  quantity    Float
+  unitPrice   Float
+  mrp         Float
+  discount    Float   @default(0)
+  gstRate     Float
+  cgstAmount  Float   @default(0)
+  sgstAmount  Float   @default(0)
+  igstAmount  Float   @default(0)
+  totalAmount Float
+  
+  batchId     String?
+  expiryDate  DateTime?
+
+  invoice     Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  product     Product  @relation(fields: [productId], references: [id])
+
+  @@index([invoiceId])
+  @@index([productId])
+}
+
+// ==================== OFFLINE SYNC ====================
+
+model SyncLog {
+  id          String   @id @default(uuid())
+  storeId     String
+  userId      String
+  deviceId    String
+  installationId String?
+  direction   String   // PUSH, PULL
+  entityType  String   // Invoice, Product, Customer, etc.
+  entityId    String
+  localId     String?  // ID on local device
+  status      String   // PENDING, PROCESSING, COMPLETED, FAILED, CONFLICT
+  payload     String?  // JSON string
+  error       String?
+  retryCount  Int      @default(0)
+  syncedAt    DateTime?
+  createdAt   DateTime @default(now())
+
+  store       Store    @relation(fields: [storeId], references: [id])
+  user        User     @relation(fields: [userId], references: [id])
+
+  @@index([storeId])
+  @@index([status])
+  @@index([entityType])
+  @@index([createdAt])
+  @@index([storeId, status])
+}
+
+// ==================== AUDIT LOG ====================
+
+model AuditLog {
+  id          String   @id @default(uuid())
+  userId      String
+  action      String   // CREATE_PRODUCT, UPDATE_INVOICE, etc.
+  entityType  String
+  entityId    String
+  oldValue    String?  // JSON string
+  newValue    String?  // JSON string
+  ipAddress   String?
+  createdAt   DateTime @default(now())
+
+  user        User     @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([entityType])
+  @@index([createdAt])
+}

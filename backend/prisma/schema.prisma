@@ -1,0 +1,405 @@
+// Prisma schema - Core data model for RetailPOS
+// Supports multi-tenant stores, offline sync, GST billing, and inventory tracking
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ==================== USER & AUTH ====================
+
+model User {
+  id            String    @id @default(uuid())
+  email         String    @unique
+  phone         String?   @unique
+  passwordHash  String
+  name          String
+  role          UserRole  @default(CASHIER)
+  isActive      Boolean   @default(true)
+  storeId       String
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  lastLoginAt   DateTime?
+
+  store         Store     @relation(fields: [storeId], references: [id])
+  sessions      Session[]
+  syncLogs      SyncLog[]
+  auditLogs     AuditLog[]
+
+  @@index([storeId])
+  @@index([email])
+}
+
+model Session {
+  id           String   @id @default(uuid())
+  userId       String
+  refreshToken String   @unique
+  deviceInfo   String?
+  expiresAt    DateTime
+  createdAt    DateTime @default(now())
+
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([refreshToken])
+}
+
+enum UserRole {
+  OWNER
+  MANAGER
+  CASHIER
+}
+
+// ==================== STORE ====================
+
+model Store {
+  id          String   @id @default(uuid())
+  name        String
+  gstin       String?  // GST Identification Number (India)
+  address     String?
+  city        String?
+  state       String?
+  pincode     String?
+  phone       String?
+  email       String?
+  currency    String   @default("INR")
+  timezone    String   @default("Asia/Kolkata")
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  users       User[]
+  products    Product[]
+  customers   Customer[]
+  invoices    Invoice[]
+  suppliers   Supplier[]
+  syncLogs    SyncLog[]
+
+  @@index([gstin])
+}
+
+// ==================== PRODUCTS & INVENTORY ====================
+
+model Product {
+  id            String   @id @default(uuid())
+  storeId       String
+  sku           String   // Internal SKU
+  barcode       String?  // EAN/UPC barcode
+  name          String
+  description   String?
+  category      String?
+  hsnCode       String?  // HSN code for GST
+  unit          String   @default("PCS") // PCS, KG, LTR, etc.
+  mrp           Decimal  @db.Decimal(12, 2) // Maximum Retail Price
+  sellingPrice  Decimal  @db.Decimal(12, 2)
+  purchasePrice Decimal  @db.Decimal(12, 2) // Cost price
+  gstRate       Decimal  @db.Decimal(5, 2) @default(18.00) // GST percentage
+  taxType       TaxType  @default(GST) // GST, EXEMPT, NIL
+  currentStock  Decimal  @db.Decimal(12, 3) @default(0)
+  minStock      Decimal  @db.Decimal(12, 3) @default(0) // Low stock threshold
+  maxStock      Decimal  @db.Decimal(12, 3) @default(0)
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  deletedAt     DateTime? // Soft delete
+
+  store         Store    @relation(fields: [storeId], references: [id])
+  batches       Batch[]
+  invoiceItems  InvoiceItem[]
+  stockMovements StockMovement[]
+
+  @@unique([storeId, sku])
+  @@unique([storeId, barcode])
+  @@index([storeId])
+  @@index([barcode])
+  @@index([category])
+}
+
+model Batch {
+  id          String   @id @default(uuid())
+  productId   String
+  batchNumber String
+  quantity    Decimal  @db.Decimal(12, 3)
+  remainingQty Decimal @db.Decimal(12, 3)
+  mfgDate     DateTime?
+  expiryDate  DateTime?
+  purchasePrice Decimal @db.Decimal(12, 2)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  product     Product  @relation(fields: [productId], references: [id])
+  stockMovements StockMovement[]
+
+  @@unique([productId, batchNumber])
+  @@index([expiryDate])
+  @@index([productId])
+}
+
+model StockMovement {
+  id            String       @id @default(uuid())
+  productId     String
+  batchId       String?
+  type          MovementType
+  quantity      Decimal      @db.Decimal(12, 3)
+  referenceType String?      // INVOICE, PURCHASE, ADJUSTMENT
+  referenceId   String?
+  notes         String?
+  createdAt     DateTime     @default(now())
+
+  product       Product      @relation(fields: [productId], references: [id])
+  batch         Batch?       @relation(fields: [batchId], references: [id])
+
+  @@index([productId])
+  @@index([type])
+  @@index([createdAt])
+  @@index([productId, createdAt])
+  @@index([referenceType, referenceId])
+}
+
+enum MovementType {
+  IN    // Stock in (purchase, return)
+  OUT   // Stock out (sale, waste)
+  ADJUSTMENT
+}
+
+enum TaxType {
+  GST
+  EXEMPT
+  NIL
+}
+
+// ==================== CUSTOMER ====================
+
+model Customer {
+  id          String   @id @default(uuid())
+  storeId     String
+  name        String
+  phone       String?
+  email       String?
+  gstin       String?  // For B2B customers
+  address     String?
+  creditLimit Decimal  @db.Decimal(12, 2) @default(0)
+  balance     Decimal  @db.Decimal(12, 2) @default(0) // Outstanding balance
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  store       Store    @relation(fields: [storeId], references: [id])
+  invoices    Invoice[]
+  creditLedger CreditLedgerEntry[]
+
+  @@index([storeId])
+  @@unique([storeId, phone])
+  @@index([storeId, email])
+}
+
+model CreditLedgerEntry {
+  id          String   @id @default(uuid())
+  customerId  String
+  type        CreditEntryType
+  amount      Decimal  @db.Decimal(12, 2)
+  balance     Decimal  @db.Decimal(12, 2) // Running balance after this entry
+  referenceType String? // INVOICE, PAYMENT
+  referenceId String?
+  notes       String?
+  createdAt   DateTime @default(now())
+
+  customer    Customer @relation(fields: [customerId], references: [id])
+
+  @@index([customerId])
+  @@index([createdAt])
+}
+
+enum CreditEntryType {
+  DEBIT   // Customer owes (invoice on credit)
+  CREDIT  // Customer paid
+}
+
+// ==================== SUPPLIER ====================
+
+model Supplier {
+  id          String   @id @default(uuid())
+  storeId     String
+  name        String
+  phone       String?
+  email       String?
+  gstin       String?
+  address     String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  store       Store    @relation(fields: [storeId], references: [id])
+
+  @@index([storeId])
+}
+
+// ==================== BILLING / INVOICES ====================
+
+model Invoice {
+  id            String   @id @default(uuid())
+  invoiceNumber String   @unique // Human-readable: INV-000001
+  storeId       String
+  customerId    String?
+  userId        String   // Cashier who created it
+  
+  // Totals
+  subtotal      Decimal  @db.Decimal(12, 2)
+  discountAmount Decimal @db.Decimal(12, 2) @default(0)
+  discountPercent Decimal @db.Decimal(5, 2) @default(0)
+  cgstAmount    Decimal  @db.Decimal(12, 2) @default(0)
+  sgstAmount    Decimal  @db.Decimal(12, 2) @default(0)
+  igstAmount    Decimal  @db.Decimal(12, 2) @default(0)
+  cessAmount    Decimal  @db.Decimal(12, 2) @default(0)
+  totalTax      Decimal  @db.Decimal(12, 2) @default(0)
+  roundOff      Decimal  @db.Decimal(4, 2) @default(0)
+  grandTotal    Decimal  @db.Decimal(12, 2)
+  amountPaid    Decimal  @db.Decimal(12, 2) @default(0)
+  
+  // Payment
+  paymentMethod PaymentMethod @default(CASH)
+  paymentStatus PaymentStatus @default(PAID)
+  isCreditSale Boolean   @default(false)
+  
+  // Status
+  status        InvoiceStatus @default(COMPLETED)
+  
+  // GST specific
+  isInterstate  Boolean   @default(false) // Determines CGST+SGST vs IGST
+  
+  // Sync
+  localId         String?  // ID from offline device
+  syncedAt        DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  installationId  String?  // Installation ID for idempotency
+
+  store           Store    @relation(fields: [storeId], references: [id])
+  customer        Customer? @relation(fields: [customerId], references: [id])
+  items           InvoiceItem[]
+
+  @@index([storeId])
+  @@index([customerId])
+  @@index([createdAt])
+  @@unique([storeId, localId])
+  @@index([invoiceNumber])
+  @@index([storeId, syncedAt])
+  @@index([storeId, installationId])
+}
+
+model InvoiceItem {
+  id          String   @id @default(uuid())
+  invoiceId   String
+  productId   String
+  productName String   // Snapshot at time of sale
+  hsnCode     String?
+  quantity    Decimal  @db.Decimal(12, 3)
+  unitPrice   Decimal  @db.Decimal(12, 2)
+  mrp         Decimal  @db.Decimal(12, 2)
+  discount    Decimal  @db.Decimal(12, 2) @default(0)
+  gstRate     Decimal  @db.Decimal(5, 2)
+  cgstAmount  Decimal  @db.Decimal(12, 2) @default(0)
+  sgstAmount  Decimal  @db.Decimal(12, 2) @default(0)
+  igstAmount  Decimal  @db.Decimal(12, 2) @default(0)
+  totalAmount Decimal  @db.Decimal(12, 2)
+  
+  batchId     String?
+  expiryDate  DateTime?
+
+  invoice     Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  product     Product  @relation(fields: [productId], references: [id])
+
+  @@index([invoiceId])
+  @@index([productId])
+}
+
+enum PaymentMethod {
+  CASH
+  CARD
+  UPI
+  CREDIT
+  PARTIAL
+}
+
+enum PaymentStatus {
+  PAID
+  PARTIAL
+  PENDING
+  REFUNDED
+}
+
+enum InvoiceStatus {
+  DRAFT
+  COMPLETED
+  CANCELLED
+  RETURNED
+}
+
+// ==================== OFFLINE SYNC ====================
+
+model SyncLog {
+  id            String     @id @default(uuid())
+  storeId       String
+  userId        String
+  deviceId      String
+  installationId String    // Installation ID for idempotency
+  direction     SyncDirection // PUSH (device -> server) or PULL (server -> device)
+  entityType    String     // Invoice, Product, Customer, etc.
+  entityId      String
+  localId       String?    // ID on local device
+  status        SyncStatus
+  payload       Json?      // The actual data
+  error         String?
+  retryCount    Int        @default(0)
+  syncedAt      DateTime?
+  createdAt     DateTime   @default(now())
+
+  store         Store      @relation(fields: [storeId], references: [id])
+  user          User       @relation(fields: [userId], references: [id])
+
+  @@index([storeId])
+  @@index([status])
+  @@index([entityType])
+  @@index([createdAt])
+  @@index([storeId, status])
+  @@index([storeId, installationId])
+  @@index([entityType, localId])
+  @@index([entityType, entityId])
+}
+
+enum SyncDirection {
+  PUSH
+  PULL
+}
+
+enum SyncStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  CONFLICT
+}
+
+// ==================== AUDIT LOG ====================
+
+model AuditLog {
+  id          String   @id @default(uuid())
+  userId      String
+  action      String   // CREATE_PRODUCT, UPDATE_INVOICE, etc.
+  entityType  String
+  entityId    String
+  oldValue    Json?
+  newValue    Json?
+  ipAddress   String?
+  createdAt   DateTime @default(now())
+
+  user        User     @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([entityType])
+  @@index([createdAt])
+}
