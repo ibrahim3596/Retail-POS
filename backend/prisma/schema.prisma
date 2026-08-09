@@ -102,6 +102,12 @@ model Product {
   currentStock  Decimal  @db.Decimal(12, 3) @default(0)
   minStock      Decimal  @db.Decimal(12, 3) @default(0) // Low stock threshold
   maxStock      Decimal  @db.Decimal(12, 3) @default(0)
+  brand                String?
+  variant              String?  // e.g. "500g", "Pack of 2"
+  packSize             String?
+  productImage         String?
+  identificationSource IdentificationSource @default(MANUAL)
+  verificationStatus   VerificationStatus   @default(VERIFIED_EXTERNAL)
   isActive      Boolean  @default(true)
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
@@ -402,4 +408,20 @@ model AuditLog {
   @@index([userId])
   @@index([entityType])
   @@index([createdAt])
+}
+
+enum IdentificationSource {
+  MANUAL
+  LOCAL_DB
+  EXTERNAL_API
+  OCR
+  AI
+}
+
+enum VerificationStatus {
+  VERIFIED_EXTERNAL
+  SHOPKEEPER_CONFIRMED
+  OCR_SUGGESTED
+  AI_SUGGESTED
+  UNKNOWN
 }

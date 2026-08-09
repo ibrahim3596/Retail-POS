@@ -2,7 +2,7 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { authenticate, authorize } from '@shared/middleware/auth';
-import { createProduct, findProductByBarcode, adjustStock, getLowStockProducts, getExpiringProducts } from './service';
+import { createProduct, findProductByBarcode, searchProductsPrioritized, adjustStock, getLowStockProducts, getExpiringProducts } from './service';
 import { UserRole } from '@prisma/client';
 
 const router = Router();
@@ -90,6 +90,20 @@ router.get('/barcode/:barcode', async (req: Request, res: Response, next: NextFu
   try {
     const product = await findProductByBarcode(req.user!.storeId, req.params.barcode);
     res.json({ success: true, data: product });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * GET /api/products/search
+ * Prioritized search endpoint
+ */
+router.get('/search', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const query = (req.query.q as string) || '';
+    const products = await searchProductsPrioritized(req.user!.storeId, query);
+    res.json({ success: true, data: products });
   } catch (error) {
     next(error);
   }

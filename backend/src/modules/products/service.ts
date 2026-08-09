@@ -8,8 +8,14 @@ export interface CreateProductInput {
   sku: string;
   barcode?: string;
   name: string;
-  description?: string;
+  brand?: string;
   category?: string;
+  variant?: string;
+  packSize?: string;
+  productImage?: string;
+  identificationSource?: 'MANUAL' | 'LOCAL_DB' | 'EXTERNAL_API' | 'OCR' | 'AI';
+  verificationStatus?: 'VERIFIED_EXTERNAL' | 'SHOPKEEPER_CONFIRMED' | 'OCR_SUGGESTED' | 'AI_SUGGESTED' | 'UNKNOWN';
+  description?: string;
   hsnCode?: string;
   unit?: string;
   mrp: number;
@@ -47,8 +53,8 @@ export async function createProduct(input: CreateProductInput) {
     throw new ConflictError(`Product with SKU '${input.sku}' already exists`);
   }
 
-  // Check for duplicate barcode
-  if (input.barcode) {
+  // Check for duplicate barcode (store-scoped)
+  if (input.barcode && input.barcode.trim() !== '') {
     const existingBarcode = await prisma.product.findFirst({
       where: { storeId: input.storeId, barcode: input.barcode },
     });
@@ -61,10 +67,16 @@ export async function createProduct(input: CreateProductInput) {
     data: {
       storeId: input.storeId,
       sku: input.sku,
-      barcode: input.barcode,
+      barcode: input.barcode && input.barcode.trim() !== '' ? input.barcode : null,
       name: input.name,
+      brand: input.brand || null,
+      category: input.category || null,
+      variant: input.variant || null,
+      packSize: input.packSize || null,
+      productImage: input.productImage || null,
+      identificationSource: input.identificationSource || 'MANUAL',
+      verificationStatus: input.verificationStatus || 'VERIFIED_EXTERNAL',
       description: input.description,
-      category: input.category,
       hsnCode: input.hsnCode,
       unit: input.unit || 'PCS',
       mrp: input.mrp,
@@ -114,6 +126,78 @@ export async function findProductByBarcode(storeId: string, barcode: string) {
   }
 
   return product;
+}
+
+/**
+ * Prioritized Product Search Hierarchy:
+ * 1. Exact Barcode Match
+ * 2. Exact SKU Match
+ * 3. Exact Normalized Name Match
+ * 4. Prefix Name Match
+ * 5. Brand / Category Match
+ * 6. Fuzzy Fallback Match
+ */
+export async function searchProductsPrioritized(storeId: string, query: string) {
+  const trimmed = query.trim();
+  if (!trimmed) return [];
+
+  // 1. Exact Barcode
+  const exactBarcode = await prisma.product.findMany({
+    where: { storeId, barcode: trimmed, isActive: true },
+    include: { batches: { where: { remainingQty: { gt: 0 } }, orderBy: { expiryDate: 'asc' } } },
+  });
+  if (exactBarcode.length > 0) return exactBarcode;
+
+  // 2. Exact SKU
+  const exactSku = await prisma.product.findMany({
+    where: { storeId, sku: trimmed, isActive: true },
+    include: { batches: { where: { remainingQty: { gt: 0 } }, orderBy: { expiryDate: 'asc' } } },
+  });
+  if (exactSku.length > 0) return exactSku;
+
+  // 3. Exact Normalized Name
+  const exactName = await prisma.product.findMany({
+    where: { storeId, name: { equals: trimmed }, isActive: true },
+    include: { batches: { where: { remainingQty: { gt: 0 } }, orderBy: { expiryDate: 'asc' } } },
+  });
+  if (exactName.length > 0) return exactName;
+
+  // 4. Prefix Name Match
+  const prefixName = await prisma.product.findMany({
+    where: { storeId, name: { startsWith: trimmed }, isActive: true },
+    include: { batches: { where: { remainingQty: { gt: 0 } }, orderBy: { expiryDate: 'asc' } } },
+    take: 20,
+  });
+  if (prefixName.length > 0) return prefixName;
+
+  // 5. Brand / Category Match
+  const brandCat = await prisma.product.findMany({
+    where: {
+      storeId,
+      isActive: true,
+      OR: [
+        { brand: { contains: trimmed } },
+        { category: { contains: trimmed } },
+      ],
+    },
+    include: { batches: { where: { remainingQty: { gt: 0 } }, orderBy: { expiryDate: 'asc' } } },
+    take: 20,
+  });
+  if (brandCat.length > 0) return brandCat;
+
+  // 6. Fuzzy / Substring Fallback Match
+  return prisma.product.findMany({
+    where: {
+      storeId,
+      isActive: true,
+      OR: [
+        { name: { contains: trimmed } },
+        { description: { contains: trimmed } },
+      ],
+    },
+    include: { batches: { where: { remainingQty: { gt: 0 } }, orderBy: { expiryDate: 'asc' } } },
+    take: 20,
+  });
 }
 
 /**

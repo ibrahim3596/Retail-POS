@@ -96,6 +96,12 @@ model Product {
   currentStock  Float    @default(0)
   minStock      Float    @default(0) // Low stock threshold
   maxStock      Float    @default(0)
+  brand                String?
+  variant              String?  // e.g. "500g", "Pack of 2"
+  packSize             String?
+  productImage         String?
+  identificationSource String   @default("MANUAL")
+  verificationStatus   String   @default("VERIFIED_EXTERNAL")
   isActive      Boolean  @default(true)
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt

@@ -184,8 +184,16 @@ await db.executeSql(`
     // Column already exists, ignore error
   });
 
+  // Migration: Add Product Master metadata columns to products
+  await db.executeSql(`ALTER TABLE products ADD COLUMN brand TEXT`).catch(() => {});
+  await db.executeSql(`ALTER TABLE products ADD COLUMN variant TEXT`).catch(() => {});
+  await db.executeSql(`ALTER TABLE products ADD COLUMN pack_size TEXT`).catch(() => {});
+  await db.executeSql(`ALTER TABLE products ADD COLUMN product_image TEXT`).catch(() => {});
+  await db.executeSql(`ALTER TABLE products ADD COLUMN identification_source TEXT DEFAULT 'MANUAL'`).catch(() => {});
+  await db.executeSql(`ALTER TABLE products ADD COLUMN verification_status TEXT DEFAULT 'VERIFIED_EXTERNAL'`).catch(() => {});
+
   // Create indices for performance
-  await db.executeSql(`CREATE INDEX IF NOT EXISTS idx_products_barcode ON products(barcode)`);
+  await db.executeSql(`CREATE UNIQUE INDEX IF NOT EXISTS idx_products_store_barcode ON products(store_id, barcode) WHERE barcode IS NOT NULL AND barcode != ''`);
   await db.executeSql(`CREATE INDEX IF NOT EXISTS idx_products_store ON products(store_id)`);
   await db.executeSql(`CREATE INDEX IF NOT EXISTS idx_invoices_synced ON invoices(is_synced)`);
   await db.executeSql(`CREATE INDEX IF NOT EXISTS idx_sync_queue_entity ON sync_queue(entity_type)`);
